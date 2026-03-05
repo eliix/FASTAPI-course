@@ -13,14 +13,28 @@ from sqlalchemy import (
     DateTime,
     select,
     func,
-    delete,
+    UniqueConstraint,
+    ForeignKey,
+    Table,
+    Column,
 )
-from sqlalchemy.orm import sessionmaker, Session, DeclarativeBase, Mapped, mapped_column
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm import (
+    sessionmaker,
+    Session,
+    DeclarativeBase,
+    Mapped,
+    mapped_column,
+    relationship,
+    selectinload,
+    joinedload,
+)
+from sqlalchemy.exc import SQLAlchemyError, IntegrityError
 from colorama import Fore
+from dotenv import load_dotenv
 
+load_dotenv()
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./blog.db")  ##motor://ruta
-print(Fore.LIGHTBLUE_EX + "Conectado a: ", DATABASE_URL)
+
 
 engine_kwargs = {}
 
@@ -37,21 +51,60 @@ engine = create_engine(
 SessionLocal = sessionmaker(
     bind=engine, autoflush=False, autocommit=False, class_=Session
 )
-# session: forma con la que se interactua con la bd
-# bind=engine: conecta la sesion con ese engine
 
 
 class Base(DeclarativeBase):
     pass
 
 
+post_tags = Table(  # tabla intermedia
+    "post_tags",
+    Base.metadata,
+    Column("post_id", ForeignKey("posts.id", ondelete="CASCADE"), primary_key=True),
+    Column("tag_id", ForeignKey("tags.id", ondelete="CASCADE"), primary_key=True),
+)
+
+
+class AuthorORM(Base):  # authors y post se relacionan(1 a N)
+    __tablename__ = "authors"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    email: Mapped[str] = mapped_column(String(100), unique=True, index=True)
+
+    posts: Mapped[List["PostORM"]] = relationship(back_populates="author")
+
+
+class TagORM(Base):
+    __tablename__ = "tags"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    name: Mapped[str] = mapped_column(String(30), unique=True, index=True)
+
+    posts: Mapped[List["PostORM"]] = relationship(
+        secondary=post_tags, back_populates="tags", lazy="selectin"
+    )
+
+
 class PostORM(Base):
     __tablename__ = "posts"
-
+    __table_args__ = (UniqueConstraint("title", name="unique_post_title"),)  # tupla
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     title: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
     content: Mapped[str] = mapped_column(Text, nullable=False)
-    create_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(
+        "create_at", DateTime, default=datetime.utcnow
+    )
+
+    author_id: Mapped[Optional[int]] = mapped_column(ForeignKey("authors.id"))
+    author: Mapped[Optional["AuthorORM"]] = relationship(back_populates="posts")
+
+    tags: Mapped[List["TagORM"]] = relationship(
+        secondary=post_tags,
+        back_populates="posts",
+        lazy="selectin",
+        passive_deletes=True,
+    )
 
 
 Base.metadata.create_all(bind=engine)  # crea tablas en caso de que mo existan - dev
@@ -76,6 +129,7 @@ class Tag(BaseModel):
         max_length=30,
         description="Nombre de la etiqueta",
     )
+    model_config = ConfigDict(from_attributes=True)
 
 
 class Author(BaseModel):
@@ -83,6 +137,7 @@ class Author(BaseModel):
         ..., min_length=2, max_length=30, description="Nombre del autor del post"
     )
     email: EmailStr = Field(..., description="Email del autor del post")
+    model_config = ConfigDict(from_attributes=True)
 
 
 BAD_WORDS = ["porn", "xxx", "tits", "boobs", "dick", "cock", "pussy", "coochie"]
@@ -93,6 +148,7 @@ class PostBase(BaseModel):
     content: str
     tags: Optional[List[Tag]] = Field(default_factory=list)
     author: Optional[Author] = None
+    model_config = ConfigDict(from_attributes=True)
 
 
 class PostCreate(BaseModel):
@@ -253,14 +309,23 @@ def filter_by_tags(
         min_length=1,
         description="Una o más etiquetas. Ejemplo: ?tags=python&tags=fastapi",
     ),
+    db: Session = Depends(get_db),
 ):
-    tags_lower = [tag.lower() for tag in tags]
+    normalized_tag_names = [tag.strip().lower() for tag in tags if tag.strip().lower()]
+    if not normalized_tag_names:
+        return []
+    post_list = (
+        select(PostORM)
+        .options(
+            selectinload(PostORM.tags),
+            joinedload(PostORM.author),
+        )
+        .where(PostORM.tags.any(func.lower(TagORM.name).in_(normalized_tag_names)))
+        .order_by(PostORM.id.asc())
+    )
+    posts = db.execute(post_list).scalars().all()
 
-    return [
-        post
-        for post in BLOG_POST
-        if any(tag["name"].lower() in tags_lower for tag in post.get("tags", []))
-    ]
+    return posts
 
 
 @app.get(
@@ -298,12 +363,37 @@ def get_post(
     status_code=status.HTTP_201_CREATED,
 )
 def create_post(post: PostCreate, db: Session = Depends(get_db)):
-    new_post = PostORM(title=post.title, content=post.content)
+    author_obj = None
+    if post.author:
+        author_obj = db.execute(
+            select(AuthorORM).where(AuthorORM.email == post.author.email)
+        ).scalar_one_or_none()
+        if not author_obj:
+            author_obj = AuthorORM(name=post.author.name, email=post.author.email)
+
+            db.add(author_obj)
+            db.flush()
+
+    new_post = PostORM(title=post.title, content=post.content, author=author_obj)
+    db.add(new_post)
+
+    for tag in post.tags:
+        tag_obj = db.execute(
+            select(TagORM).where(TagORM.name.ilike(tag.name))
+        ).scalar_one_or_none()
+
+        if not tag_obj:
+            tag_obj = TagORM(name=tag.name)
+            db.add(tag_obj)
+            db.flush()
+        new_post.tags.append(tag_obj)  # MUCHOS A MUCHOS
     try:
-        db.add(new_post)
         db.commit()
         db.refresh(new_post)
         return new_post
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="El titulo ya existe")
     except SQLAlchemyError:
         db.rollback()
         raise HTTPException(status_code=500, detail="Error al crear el post")
@@ -332,17 +422,6 @@ def update_post(post_id: int, data: PostUpdate, db: Session = Depends(get_db)):
     except SQLAlchemyError:
         db.rollback()
         raise HTTPException(status_code=500, detail="Error al guardar los cambios")
-
-    # for post in BLOG_POST:
-    #     if post["id"] == post_id:
-    #         playload = data.model_dump(
-    #             exclude_unset=True,
-    #         )  # convierte a dict y excluye lo que no pones!(en vez de poner None)
-    #         if "title" in playload:
-    #             post["title"] = playload["title"]
-    #         if "content" in playload:
-    #             post["content"] = playload["content"]
-    #         return post
 
 
 @app.delete("/posts/{post_id}", status_code=status.HTTP_204_NO_CONTENT)
