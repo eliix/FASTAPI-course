@@ -13,5 +13,5 @@ class TokenData(BaseModel):
 
 class UserPublic(BaseModel):
     email: str
-    username: SyntaxError
+    username: str
     model_config = ConfigDict(from_attributes=True)
