@@ -4,6 +4,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy.exc import SQLAlchemyError, IntegrityError
 from typing import List, Optional, Union, Literal
 from app.core.db import get_db
+from app.core.security import get_current_user
 from .schemas import PostPublic, PaginatedPost, PostCreate, PostUpdate, PostSummary
 from .repository import PostRepository
 from app.core.security import oauth2_scheme
@@ -135,13 +136,14 @@ def get_post(
     response_description="Post Creado(OK)",
     status_code=status.HTTP_201_CREATED,
 )
-def create_post(post: PostCreate, db: Session = Depends(get_db)):
+def create_post(post: PostCreate, db: Session = Depends(get_db), user= Depends(get_current_user)):
     repository = PostRepository(db)
     try:
         post = repository.create_post(
             title=post.title,
             content=post.content,
-            author=(post.author.model_dump() if post.author else None),
+            author=user,
+            # author=(post.author.model_dump() if post.author else None),
             tags=[tag.model_dump() for tag in post.tags],
         )
         db.commit()

@@ -45,7 +45,7 @@ class PostCreate(BaseModel):
         examples=["Este es un contenido valido por que tiene 10 caracteres o más"],
     )
     tags: List[Tag] = Field(default_factory=list)
-    author: Optional[Author] = None
+    # author: Optional[Author] = None
 
     @field_validator("title")  # evalua el campo titulo
     @classmethod  # ocupa la clase (nombre del modelo, manipula el valor a nivel clase)

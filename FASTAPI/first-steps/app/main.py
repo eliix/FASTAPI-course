@@ -1,8 +1,8 @@
 from fastapi import FastAPI
-from app.core.db import Base, engine
-from app.api.v1.posts.router import router as post_router
-from app.api.v1.auth.router import router as auth_router
-# import uvicorn
+from core.db import Base, engine
+from api.v1.posts.router import router as post_router
+from api.v1.auth.router import router as auth_router
+import uvicorn
 
 
 def create_app() -> FastAPI:
@@ -15,5 +15,5 @@ def create_app() -> FastAPI:
 
 app = create_app()
 
-# if __name__ == "__main__":
-#     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+if __name__ == "__main__":
+    uvicorn.run("app.main:app", host="0.0.0.0", port=8000, reload=True)
